@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微缩圣诞夜 | Miniature Christmas</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-family: sans-serif; pointer-events: none; opacity: 0; transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在加载微缩世界...</div>
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, controls;
+        let composer;
+        let snowSystem;
+        const clock = new THREE.Clock();
+
+        // 配置参数 (便于调整)
+        const params = {
+            focus: 25.0,      // 焦距距离 (微缩模型的关键)
+            aperture: 0.015,   // 光圈大小 (越大背景越虚)
+            maxblur: 0.02,    // 最大模糊程度
+            bloomStrength: 1.5, // 辉光强度
+            bloomThreshold: 0.6, // 辉光阈值
+            bloomRadius: 0.5
+        };
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            // 1. 场景与相机
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x020205); // 极深的夜色
+            // 雾气模拟夜晚的空气密度，颜色稍微偏冷蓝
+            scene.fog = new THREE.FogExp2(0x050510, 0.02);
+
+            // 【关键技巧】微缩摄影通常使用长焦镜头
+            // 我们用较小的 FOV (25) 配合较远的距离，来压缩透视，产生模型感
+            camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(25, 18, 25); 
+
+            // 2. 渲染器配置 (追求真实感)
+            renderer = new THREE.WebGLRenderer({ antialias: false }); // 后期处理开启时，通常关闭原生AA以提升性能
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // 软阴影
+            // 电影级色调映射
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 0.9;
+            container.appendChild(renderer.domElement);
+
+            // 3. 灯光系统 (冷暖对比)
+            setupLighting();
+
+            // 4. 内容创建
+            createTerrain();
+            
+            // --- 模型加载逻辑 ---
+            // 如果你有 GLB 模型，请取消下面这行的注释，并注释掉 createPlaceholderHouse()
+            // loadCustomModel('path/to/your/model.glb');
+            createPlaceholderHouse(); // 默认使用代码生成的房子
+
+            // 5. 粒子系统
+            createSnow();
+
+            // 6. 后期处理 (Bloom + Bokeh)
+            setupPostProcessing();
+
+            // 控制器
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.minDistance = 10;
+            controls.maxDistance = 60;
+            controls.maxPolarAngle = Math.PI / 2 - 0.05; // 限制不钻入地下
+            // 稍微自动旋转展示
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.5;
+
+            window.addEventListener('resize', onResize);
+        }
+
+        function setupLighting() {
+            // 环境光：非常弱的冷蓝色，模拟月光反射
+            const ambientLight = new THREE.AmbientLight(0x2c3e50, 0.5);
+            scene.add(ambientLight);
+
+            // 主光源 (月光)：冷白色，投射阴影
+            const moonLight = new THREE.DirectionalLight(0xaaccff, 1.2);
+            moonLight.position.set(-20, 30, -20);
+            moonLight.castShadow = true;
+            moonLight.shadow.mapSize.set(2048, 2048);
+            moonLight.shadow.bias = -0.0001;
+            scene.add(moonLight);
+
+            // 补光：侧面的冷光，增加模型轮廓感
+            const rimLight = new THREE.DirectionalLight(0x445588, 0.5);
+            rimLight.position.set(20, 10, 20);
+            scene.add(rimLight);
+        }
+
+        // --- 程序化生成模型 (作为 GLB 的替补) ---
+        function createPlaceholderHouse() {
+            const houseGroup = new THREE.Group();
+
+            // 材质：稍微带点反射，增加真实感
+            const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a4d41, roughness: 0.8 });
+            const roofMat = new THREE.MeshStandardMaterial({ color: 0x883333, roughness: 0.6 });
+            // 【关键】自发光材质，配合 Bloom 产生辉光
+            const windowMat = new THREE.MeshStandardMaterial({ 
+                color: 0xffaa00, 
+                emissive: 0xff9900, 
+                emissiveIntensity: 5, // 强度必须高才能在 Bloom 中发光
+                roughness: 0.1
+            });
+
+            // 房子主体
+            const base = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 3), woodMat);
+            base.position.y = 1.5;
+            base.castShadow = true;
+            base.receiveShadow = true;
+            houseGroup.add(base);
+
+            // 屋顶
+            const roof = new THREE.Mesh(new THREE.ConeGeometry(3.5, 2, 4), roofMat);
+            roof.position.y = 4;
+            roof.rotation.y = Math.PI / 4;
+            roof.scale.z = 1.2; 
+            roof.castShadow = true;
+            houseGroup.add(roof);
+
+            // 窗户光
+            const win1 = new THREE.Mesh(new THREE.PlaneGeometry(1, 1.2), windowMat);
+            win1.position.set(0, 1.8, 1.55);
+            houseGroup.add(win1);
+
+            // 暖色点光源 (放在窗户位置，照亮门前的雪)
+            const warmLight = new THREE.PointLight(0xffaa00, 3, 10);
+            warmLight.position.set(0, 2, 2);
+            warmLight.castShadow = true; // 让窗户的光也能产生阴影，增加层次
+            houseGroup.add(warmLight);
+
+            // 简单的树
+            for(let i=0; i<5; i++) {
+                const tree = createSimpleTree();
+                const angle = (i / 5) * Math.PI * 2;
+                tree.position.set(Math.cos(angle)*6, 0, Math.sin(angle)*6);
+                houseGroup.add(tree);
+            }
+
+            scene.add(houseGroup);
+        }
+
+        function createSimpleTree() {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({ color: 0x1a2e1a, roughness: 0.9 });
+            const snowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 });
+            
+            const level1 = new THREE.Mesh(new THREE.ConeGeometry(1.5, 2, 7), mat);
+            level1.position.y = 1;
+            level1.castShadow = true;
+            group.add(level1);
+            
+            const snowCap = new THREE.Mesh(new THREE.ConeGeometry(1.6, 0.5, 7), snowMat);
+            snowCap.position.y = 1.5;
+            group.add(snowCap);
+
+            return group;
+        }
+
+        // --- GLB 加载接口 (预留) ---
+        function loadCustomModel(path) {
+            const loader = new GLTFLoader();
+            document.getElementById('loading').style.opacity = 1;
+
+            loader.load(path, (gltf) => {
+                const model = gltf.scene;
+                
+                // 自动调整模型材质以适应光影
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        // 如果材质是 StandardMaterial，可以增强一点 roughness 适应雪景
+                        if (child.material.map) child.material.roughness = 1;
+                    }
+                    // 检测模型中是否有名字包含 'Light' 或 'Window' 的物体，赋予发光属性
+                    if (child.name.toLowerCase().includes('window')) {
+                        child.material = new THREE.MeshStandardMaterial({
+                            color: 0xffaa00, emissive: 0xffaa00, emissiveIntensity: 4
+                        });
+                        // 动态添加点光源
+                        const light = new THREE.PointLight(0xffaa00, 2, 5);
+                        light.position.copy(child.position);
+                        scene.add(light);
+                    }
+                });
+
+                scene.add(model);
+                document.getElementById('loading').style.opacity = 0;
+            });
+        }
+
+        function createTerrain() {
+            // 地面：使用圆盘，细分程度高一些以便做置换（如果需要）
+            const geometry = new THREE.CircleGeometry(20, 64);
+            const material = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                roughness: 0.9, // 雪不是完全光滑的
+                metalness: 0.1
+            });
+            const ground = new THREE.Mesh(geometry, material);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+        }
+
+        function createSnow() {
+            const particleCount = 2000;
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = []; // 存储每个粒子的速度
+
+            for (let i = 0; i < particleCount; i++) {
+                // x, y, z
+                positions.push((Math.random() - 0.5) * 40);
+                positions.push(Math.random() * 20);
+                positions.push((Math.random() - 0.5) * 40);
+                
+                // 随机下落速度和水平漂移速度
+                velocities.push({
+                    y: - (0.02 + Math.random() * 0.05),
+                    x: (Math.random() - 0.5) * 0.02,
+                    z: (Math.random() - 0.5) * 0.02
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            
+            // 程序化生成圆形雪花贴图 (避免外部图片跨域问题)
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16,16,0,16,16,16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            const texture = new THREE.CanvasTexture(canvas);
+
+            const material = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 0.3,
+                map: texture,
+                transparent: true,
+                opacity: 0.8,
+                depthWrite: false, // 防止遮挡辉光
+                blending: THREE.AdditiveBlending
+            });
+
+            snowSystem = new THREE.Points(geometry, material);
+            snowSystem.userData = { velocities: velocities };
+            scene.add(snowSystem);
+        }
+
+        function setupPostProcessing() {
+            composer = new EffectComposer(renderer);
+            
+            // 1. 基础渲染通道
+            const renderPass = new RenderPass(scene, camera);
+            composer.addPass(renderPass);
+
+            // 2. 辉光通道 (UnrealBloomPass) - 模拟暖灯溢出
+            const bloomPass = new THREE.UnrealBloomPass(
+                new THREE.Vector2(window.innerWidth, window.innerHeight),
+                params.bloomStrength,
+                params.bloomRadius,
+                params.bloomThreshold
+            );
+            composer.addPass(bloomPass);
+
+            // 3. 景深通道 (BokehPass) - 模拟微距虚化
+            const bokehPass = new BokehPass(scene, camera, {
+                focus: params.focus,
+                aperture: params.aperture,
+                maxblur: params.maxblur
+            });
+            composer.addPass(bokehPass);
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            
+            // 雪花动画
+            if (snowSystem) {
+                const positions = snowSystem.geometry.attributes.position.array;
+                const vels = snowSystem.userData.velocities;
+                
+                for (let i = 0; i < vels.length; i++) {
+                    // 更新位置
+                    positions[i*3] += vels[i].x;     // X漂移
+                    positions[i*3+1] += vels[i].y;   // Y下落
+                    positions[i*3+2] += vels[i].z;   // Z漂移
+
+                    // 循环：如果落到地面以下，重置到顶部
+                    if (positions[i*3+1] < 0) {
+                        positions[i*3+1] = 20;
+                    }
+                }
+                snowSystem.geometry.attributes.position.needsUpdate = true;
+            }
+
+            // 使用 Composer 替代 renderer.render
+            composer.render();
+        }
+    </script>
+</body>
+</html>
